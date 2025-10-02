@@ -1,4 +1,4 @@
-# train_codebert.py
+# static_train_codebart_gpu.py
 from datasets import load_dataset
 from transformers import AutoTokenizer, AutoModelForSequenceClassification, TrainingArguments, Trainer
 import numpy as np
@@ -18,31 +18,31 @@ dataset = load_dataset('json', data_files={
     'test': './data/static/juliet_codebert_dataset/test.jsonl'
 })
 
-# ensure label field exists as int
+# ensure label exists and is int
 def fix_label(example):
     example['label'] = int(example['label'])
     return example
 
 dataset = dataset.map(fix_label)
-dataset = dataset.map(tokenize_fn, batched=True, remove_columns=[c for c in dataset['train'].column_names if c not in ['text', 'label']])
-# make sure labels column exists for Trainer as 'labels'
+# tokenize and remove other columns if any
+dataset = dataset.map(tokenize_fn, batched=True)
+# ensure Trainer expects 'labels'
 dataset = dataset.map(lambda x: {'labels': x['label']})
 dataset.set_format(type='torch', columns=['input_ids','attention_mask','labels'])
 
-# load model
 model = AutoModelForSequenceClassification.from_pretrained(MODEL, num_labels=2)
 
-# compute class weights (cpu tensor; we'll move to device in compute_loss)
+# compute class weights
 train_labels = np.array(dataset['train']['labels'])
-n0 = (train_labels==0).sum()
-n1 = (train_labels==1).sum()
+n0 = int((train_labels==0).sum())
+n1 = int((train_labels==1).sum())
 if n0 == 0 or n1 == 0:
-    print("[WARN] One of the classes has zero samples. Class weights set to None.")
+    print("[WARN] One class has zero samples; class weighting disabled.")
     class_weights = None
 else:
     w0 = (n0 + n1) / (2.0 * n0)
     w1 = (n0 + n1) / (2.0 * n1)
-    class_weights = torch.tensor([w0, w1])  # keep on cpu; moved to device later
+    class_weights = torch.tensor([w0, w1])
 
 def compute_metrics(eval_pred):
     logits, labels = eval_pred
@@ -54,23 +54,22 @@ def compute_metrics(eval_pred):
         'f1': f1_score(labels, preds, zero_division=0),
     }
 
-# Detect CUDA (GPU) availability
+# Detect device
 use_cuda = torch.cuda.is_available()
 if use_cuda:
     print(f"[INFO] CUDA available. Using GPU: {torch.cuda.get_device_name(0)}")
 else:
-    # Check for MPS on macOS
     use_mps = hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
     if use_mps:
-        print("[INFO] MPS (Apple Silicon) is available; Trainer will try to use MPS device.")
+        print("[INFO] MPS available (Apple Silicon).")
     else:
-        print("[INFO] CUDA not available. Training will run on CPU.")
+        print("[INFO] No CUDA/MPS detected — training on CPU.")
 
-# TrainingArguments: enable fp16 if CUDA available (or you can keep False)
+# NOTE: old transformers uses 'eval_strategy' instead of 'evaluation_strategy'
 training_args = TrainingArguments(
     output_dir="./static-codebert",
-    evaluation_strategy="epoch",
-    per_device_train_batch_size=8,   # adjust if OOM on your GPU
+    eval_strategy="epoch",               # <-- older HF uses 'eval_strategy' name; keep this for compatibility
+    per_device_train_batch_size=8,
     per_device_eval_batch_size=8,
     num_train_epochs=3,
     weight_decay=0.01,
@@ -79,29 +78,20 @@ training_args = TrainingArguments(
     logging_steps=100,
     save_strategy="epoch",
     save_total_limit=2,
-    fp16=True if use_cuda else False,   # use mixed precision on CUDA for speed/memory
-    fp16_opt_level="O1",                # optional, HF will accept True/False; opt_level used in some envs
+    fp16=True if use_cuda else False,
 )
 
 class WeightedTrainer(Trainer):
-    """
-    WeightedTrainer overrides compute_loss to apply class weights.
-    Accepts extra kwargs forwarded by Trainer.train() (keeps compatibility).
-    """
     def __init__(self, class_weights_tensor=None, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # class_weights_tensor should be a torch.Tensor (cpu) or None
         self.class_weights = class_weights_tensor
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
-        # labels might be under "labels"
+        # Accept extra kwargs for backwards/forwards compatibility
         labels = inputs.get("labels")
-        # forward pass
         outputs = model(**inputs)
         logits = outputs.logits if hasattr(outputs, "logits") else outputs.get("logits")
-        # build loss
         if self.class_weights is not None:
-            # move class weights to same device as logits
             cw = self.class_weights.to(logits.device)
             loss_fct = torch.nn.CrossEntropyLoss(weight=cw)
         else:
@@ -109,7 +99,6 @@ class WeightedTrainer(Trainer):
         loss = loss_fct(logits.view(-1, logits.size(-1)), labels.view(-1))
         return (loss, outputs) if return_outputs else loss
 
-# Build trainer
 trainer = WeightedTrainer(
     model=model,
     args=training_args,
@@ -120,13 +109,9 @@ trainer = WeightedTrainer(
     class_weights_tensor=class_weights
 )
 
-# Optional: pin memory advice
-if use_cuda:
-    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+# optional: reduce tokenizer parallelism noise
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-# Start training
 trainer.train()
-
-# Evaluate on test set
 res = trainer.evaluate(dataset['test'])
 print("Test eval:", res)
