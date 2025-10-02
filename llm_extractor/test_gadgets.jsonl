@@ -1,0 +1,1 @@
+{"id": "source.c:15", "file": "../../VulDeePecker/VulDeePecker/CWE-119/source_files/6/Using_freed_memory.c", "slice_begin": 15, "slice_end": 15, "gadget_code": "strncpy(buf2R1, argv[1], BUFSIZER1-1);"}
