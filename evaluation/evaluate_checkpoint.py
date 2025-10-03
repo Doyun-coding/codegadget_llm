@@ -8,6 +8,14 @@ Saves:
  - outdir/confusion_matrix.png
  - outdir/roc_pr_curve.png
 
+ python evaluate_checkpoint.py \
+  --ckpt static-codebert/checkpoint-14148 \
+  --test-json ./data/static/juliet_codebert_dataset/test.jsonl \
+  --outdir ./eval/out \
+  --batch-size 32 \
+  --bootstrap 1000
+
+
 Required packages:
   pip install transformers datasets torch scikit-learn matplotlib seaborn pandas numpy
 
