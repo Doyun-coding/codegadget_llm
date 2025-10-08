@@ -8,17 +8,13 @@ Saves:
  - outdir/confusion_matrix.png
  - outdir/roc_pr_curve.png
 
+Usage example:
  python evaluate_checkpoint.py \
   --ckpt static-codebert/checkpoint-14148 \
   --test-json ./data/static/juliet_codebert_dataset/test.jsonl \
   --outdir ./eval/out \
   --batch-size 32 \
   --bootstrap 1000
-
-
-Required packages:
-  pip install transformers datasets torch scikit-learn matplotlib seaborn pandas numpy
-
 """
 import argparse, json, os, math
 from pathlib import Path
@@ -35,6 +31,8 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from tqdm import tqdm
 import random
+import torch.nn.functional as F
+from torch.utils.data import DataLoader
 
 def safe_load_dataset(test_json):
     ds = load_dataset("json", data_files={"test": test_json})["test"]
@@ -50,18 +48,97 @@ def tokenize_dataset(ds, tokenizer, batch_size, max_length=512):
     return ds
 
 def predict_with_trainer(model, tokenizer, ds_test, device, batch_size):
-    # Use Trainer.predict for convenience (works if transformers & accelerate installed)
-    trainer = Trainer(model=model, tokenizer=tokenizer)
-    pred_output = trainer.predict(ds_test, max_length=tokenizer.model_max_length, batch_size=batch_size)
-    logits = pred_output.predictions
-    labels = pred_output.label_ids
+    """
+    Try HF Trainer.predict first (simple). If Trainer.predict fails due to version mismatch,
+    fall back to manual DataLoader loop (works on all versions).
+    Returns: preds (np.array), probs (np.array, N x C), labels (np.array)
+    """
+    model.to(device)
+    # Try trainer.predict path first (most convenient)
+    try:
+        trainer = Trainer(model=model, tokenizer=tokenizer)
+        # Do NOT pass unsupported kwargs like max_length here. Only batch_size.
+        pred_output = trainer.predict(ds_test, batch_size=batch_size)
+        logits = pred_output.predictions
+        labels = pred_output.label_ids
+        if logits is None:
+            raise RuntimeError("Trainer.predict returned no predictions")
+        logits = np.asarray(logits)
+        # handle common shapes
+        if logits.ndim == 1:
+            # If model returns single logit / probability for positive class
+            probs = np.vstack([1 - logits, logits]).T
+        elif logits.ndim == 2:
+            # (N, num_labels)
+            # compute softmax safely
+            logits_t = torch.from_numpy(logits)
+            probs = F.softmax(logits_t, dim=-1).cpu().numpy()
+        elif logits.ndim == 3:
+            # sometimes shape (N, seq_len, num_labels) -> take first token's logits
+            if logits.shape[1] == 1:
+                logits2 = logits[:,0,:]
+            else:
+                # heuristic: take mean over seq dim or first token
+                logits2 = logits[:,0,:]
+            logits_t = torch.from_numpy(logits2)
+            probs = F.softmax(logits_t, dim=-1).cpu().numpy()
+        else:
+            raise RuntimeError(f"Unexpected logits ndim: {logits.ndim}")
+        preds = np.argmax(probs, axis=1)
+        labels = np.asarray(labels) if labels is not None else None
+        return preds, probs, labels
+    except TypeError as e:
+        # likely Trainer.predict signature mismatch in this version
+        print(f"[WARN] Trainer.predict approach failed ({e}), falling back to manual DataLoader inference...", flush=True)
+    except Exception as e:
+        # other failure: fallback as well but print
+        print(f"[WARN] Trainer.predict raised exception ({e}), falling back to manual inference...", flush=True)
+
+    # Manual inference fallback
+    # ds_test is a HF Dataset in torch format (input_ids, attention_mask, label)
+    loader = DataLoader(ds_test, batch_size=batch_size, shuffle=False)
+    all_logits = []
+    all_labels = []
+    model.eval()
+    with torch.no_grad():
+        for batch in tqdm(loader, desc="manual predict"):
+            # batch is a dict of tensors
+            # move tensors to device
+            inputs = {}
+            if "input_ids" in batch:
+                inputs["input_ids"] = batch["input_ids"].to(device)
+            if "attention_mask" in batch:
+                inputs["attention_mask"] = batch["attention_mask"].to(device)
+            # Some models expect token_type_ids
+            if "token_type_ids" in batch:
+                inputs["token_type_ids"] = batch["token_type_ids"].to(device)
+            outputs = model(**inputs)
+            logits = outputs.logits if hasattr(outputs, "logits") else outputs[0]
+            logits = logits.detach().cpu().numpy()
+            all_logits.append(logits)
+            if "label" in batch:
+                all_labels.append(batch["label"].cpu().numpy())
+    if len(all_logits) == 0:
+        raise RuntimeError("No predictions from manual inference (empty loader?).")
+    logits = np.vstack(all_logits)
+    labels = np.concatenate(all_labels) if len(all_labels) > 0 else None
+
+    # normalize logits -> probs
     if logits.ndim == 1:
         probs = np.vstack([1 - logits, logits]).T
+    elif logits.ndim == 2:
+        probs = F.softmax(torch.from_numpy(logits), dim=-1).cpu().numpy()
+    elif logits.ndim == 3:
+        if logits.shape[1] == 1:
+            logits2 = logits[:,0,:]
+        else:
+            logits2 = logits[:,0,:]
+        probs = F.softmax(torch.from_numpy(logits2), dim=-1).cpu().numpy()
     else:
-        # softmax
-        exp = np.exp(logits - logits.max(axis=1, keepdims=True))
-        probs = exp / exp.sum(axis=1, keepdims=True)
+        raise RuntimeError(f"Unexpected logits ndim (manual): {logits.ndim}")
+
     preds = np.argmax(probs, axis=1)
+    labels = np.asarray(labels) if labels is not None else None
     return preds, probs, labels
 
 def compute_metrics_all(y_true, y_pred, probs):
@@ -80,7 +157,6 @@ def compute_metrics_all(y_true, y_pred, probs):
     # ROC AUC / PR AUC (binary only)
     classes = sorted(set(y_true))
     if len(classes) == 2:
-        # assume class labels are 0/1; get probs[:,1]
         try:
             y_score = probs[:,1]
             res["roc_auc"] = float(roc_auc_score(y_true, y_score))
@@ -106,7 +182,6 @@ def bootstrap_ci(y_true, probs, n_boot=1000, seed=42):
     for _ in tqdm(range(n_boot), desc="bootstrap"):
         idxs = [rng.randrange(0, n) for _ in range(n)]
         y_t = [y_true[i] for i in idxs]
-        # take predicted labels from probs
         p = probs[idxs]
         y_p = list(np.argmax(p, axis=1))
         accs.append(accuracy_score(y_t, y_p))
@@ -132,7 +207,6 @@ def plot_roc_pr(y_true, probs, outpath):
     if probs.shape[1] < 2:
         return
     y_score = probs[:,1]
-    # ROC
     from sklearn.metrics import roc_curve, precision_recall_curve
     fpr, tpr, _ = roc_curve(y_true, y_score)
     prec, rec, _ = precision_recall_curve(y_true, y_score)
@@ -186,7 +260,6 @@ def main():
             "true_label": int(labels[i]),
             "pred_label": int(preds[i])
         }
-        # add prob columns
         for c in range(probs.shape[1]):
             row[f"prob_{c}"] = float(probs[i,c])
         rows.append(row)
@@ -196,7 +269,6 @@ def main():
     print("Computing metrics...")
     metrics = compute_metrics_all(labels, preds, probs)
 
-    # bootstrap CIs
     if args.bootstrap > 0:
         print(f"Running bootstrap ({args.bootstrap}) to compute 95% CI for accuracy & f1_macro...")
         ci = bootstrap_ci(labels, probs, n_boot=args.bootstrap, seed=args.seed)
@@ -207,7 +279,6 @@ def main():
     with open(Path(outdir)/"metrics.json", "w", encoding="utf-8") as f:
         json.dump(out_metrics, f, indent=2)
 
-    # plots
     print("Plotting confusion matrix and ROC/PR...")
     class_names = [str(c) for c in sorted(set(labels))]
     plot_confusion_matrix(metrics["confusion_matrix"], Path(outdir)/"confusion_matrix.png", class_names)

@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
 # relabel_smart.py
+
+"""
+python relabel_smart.py \
+./static_extractor/juliet_gadgets.jsonl \
+./data/juliet_gadgets_smart_labeled.jsonl \
+"""
 import argparse, json, re, os
 from pathlib import Path
 from collections import Counter

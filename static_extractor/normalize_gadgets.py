@@ -1,4 +1,9 @@
 # normalize_gadgets.py
+"""
+python ./static_extractor/normalize_gadgets.py \
+./data/static/juliet_gadgets_smart_labeled.jsonl \
+./data/static/juliet_gadgets_normalized.jsonl
+"""
 import json, re, sys
 from pathlib import Path
 

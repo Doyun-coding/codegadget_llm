@@ -1,4 +1,12 @@
 # prepare_dataset.py
+
+"""
+ python ./static_extractor/prepare_dataset.py \
+./data/static/juliet_gadgets_normalized.jsonl \
+--outdir \
+./data/static/juliet_codebert_dataset
+"""
+
 import json, hashlib, argparse, random
 from pathlib import Path
 from collections import defaultdict
