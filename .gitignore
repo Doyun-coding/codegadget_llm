@@ -5,3 +5,15 @@
 .venv310
 *.jsonl
 ./static_extractor/v3/**
+./llm-codebert-model/**
+./hybrid-codebert-model/**
+./static-codebert-model/**
+
+*.safetensors
+*.bin
+*.pt
+*.json
+*.txt
+hybrid-codebert-model/
+llm-codebert-model/
+static-codebert-model/

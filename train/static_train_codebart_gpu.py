@@ -13,9 +13,9 @@ def tokenize_fn(batch):
     return tokenizer(batch['text'], truncation=True, padding='max_length', max_length=512)
 
 dataset = load_dataset('json', data_files={
-    'train': './data/static/juliet_codebert_dataset/train.jsonl',
-    'validation': './data/static/juliet_codebert_dataset/validation.jsonl',
-    'test': './data/static/juliet_codebert_dataset/test.jsonl'
+    'train': './data/static/v3/juliet_codebert_dataset/train.jsonl',
+    'validation': './data/static/v3/juliet_codebert_dataset/validation.jsonl',
+    'test': './data/static/v3/juliet_codebert_dataset/test.jsonl'
 })
 
 # ensure label exists and is int

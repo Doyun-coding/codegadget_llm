@@ -10,7 +10,7 @@ Saves:
 
 Usage example:
  python evaluate_checkpoint.py \
-  --ckpt static-codebert/checkpoint-14148 \
+  --ckpt static-codebert/checkpoint-14148_1 \
   --test-json ./data/static/juliet_codebert_dataset/test.jsonl \
   --outdir ./eval/out \
   --batch-size 32 \
